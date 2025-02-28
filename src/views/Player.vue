@@ -92,6 +92,8 @@
         :subject="metadata.subject"
         :testFormat="metadata.test_format || ''"
         :maxMarks="maxMarks"
+        :questionOrder="questionOrder"
+        v-model:shuffledQuestionIndex="shuffledQuestionIndex"
         v-model:currentQuestionIndex="currentQuestionIndex"
         v-model:responses="responses"
         v-model:previousResponse="previousResponse"
@@ -199,9 +201,11 @@ export default defineComponent({
     const store = useStore();
     const state = reactive({
       currentQuestionIndex: -1 as number,
+      shuffledQuestionIndex: -1 as number,
       title: null as quizTitleType,
       metadata: {} as QuizMetadata,
       questions: [] as Question[],
+      questionOrder: [] as number[],
       responses: [] as SubmittedResponse[], // holds the responses to each item submitted by the viewer
       previousResponse: {} as SubmittedResponse, // holds previous respnose for question being submitted
       previousOmrResponses: [] as SubmittedResponse[],
@@ -324,8 +328,8 @@ export default defineComponent({
 
       state.timerInterval = setInterval(() => {
         if (!isOmrMode.value && state.currentQuestionIndex >= 0 && state.currentQuestionIndex < numQuestions.value && !state.isSessionAnswerRequestProcessing) {
-          state.timeSpentOnQuestion[state.currentQuestionIndex].timeSpent += 1;
-          state.timeSpentOnQuestion[state.currentQuestionIndex].hasSynced = false;
+          state.timeSpentOnQuestion[state.shuffledQuestionIndex].timeSpent += 1;
+          state.timeSpentOnQuestion[state.shuffledQuestionIndex].hasSynced = false;
         }
       }, 1000);
     }
@@ -341,17 +345,27 @@ export default defineComponent({
       () => state.currentQuestionIndex,
       (newValue, oldValue) => {
         stoptimeSpentOnQuestionCalc();
-        if (!state.hasQuizEnded && isQuizAssessment.value && !isOmrMode.value && oldValue != -1) {
+        let shuffledOldValue = oldValue;
+        let shuffledNewValue = newValue
+
+        if (!isOmrMode.value) {
+          if (oldValue != -1) shuffledOldValue = state.questionOrder[oldValue]
+          else shuffledOldValue = -1
+          if (newValue != -1) shuffledNewValue = state.questionOrder[newValue]
+          else shuffledNewValue = -1
+        }
+        if (shuffledNewValue != -1) state.shuffledQuestionIndex = shuffledNewValue;
+        if (!state.hasQuizEnded && isQuizAssessment.value && !isOmrMode.value && shuffledOldValue != -1) {
           // update time spent for previous question in assessment
           // but not for homework
           SessionAPIService.updateSessionAnswer(
             state.sessionId,
-            oldValue,
+            shuffledOldValue,
             {
-              time_spent: state.timeSpentOnQuestion[oldValue].timeSpent
+              time_spent: state.timeSpentOnQuestion[shuffledOldValue].timeSpent
             }
           )
-          state.timeSpentOnQuestion[oldValue].hasSynced = true;
+          state.timeSpentOnQuestion[shuffledOldValue].hasSynced = true;
         }
         if (newValue == numQuestions.value) {
           if (!state.hasQuizEnded && !isQuizAssessment.value) {
@@ -362,14 +376,14 @@ export default defineComponent({
             if (!hasGradedQuestions.value) return;
             calculateScorecardMetrics();
           }
-        } else if (newValue != -1 && !state.hasQuizEnded) {
-          if (!state.responses[newValue].visited) {
+        } else if (shuffledNewValue != -1 && !state.hasQuizEnded) {
+          if (!state.responses[shuffledNewValue].visited) {
             // if not visited yet
             starttimeSpentOnQuestionCalc(); // for homework and assessment
-            state.responses[newValue].visited = true;
+            state.responses[shuffledNewValue].visited = true;
             SessionAPIService.updateSessionAnswer(
               state.sessionId,
-              state.currentQuestionIndex,
+              shuffledNewValue,
               {
                 visited: true,
               }
@@ -381,13 +395,13 @@ export default defineComponent({
             }
 
             // for homework, run the timer if question is visited but not submitted
-            if (!isQuizAssessment.value && state.responses[newValue].answer == null) {
+            if (!isQuizAssessment.value && state.responses[shuffledNewValue].answer == null) {
               starttimeSpentOnQuestionCalc();
             }
           }
         }
         // the index where cumulative length first exceeds newValue
-        [state.currentQsetIndex, state.currentQsetIndexLimits] = getQsetLimits(state.currentQuestionIndex);
+        [state.currentQsetIndex, state.currentQsetIndexLimits] = getQsetLimits(state.shuffledQuestionIndex);
       }
     );
 
@@ -533,6 +547,7 @@ export default defineComponent({
       );
       state.sessionId = sessionDetails._id;
       state.responses = sessionDetails.session_answers;
+      state.questionOrder = sessionDetails.question_order;
       for (const response of state.responses) {
         if (response.time_spent == null) {
           state.timeSpentOnQuestion.push({
@@ -558,16 +573,16 @@ export default defineComponent({
     /** updates the session answer once marked for review */
     async function updateQuestionResponse() {
       state.isSessionAnswerRequestProcessing = true;
-      const itemResponse = state.responses[state.currentQuestionIndex];
+      const itemResponse = state.responses[state.shuffledQuestionIndex];
       const payload: UpdateSessionAnswerAPIPayload = {
         marked_for_review: itemResponse.marked_for_review
       }
       const response = await SessionAPIService.updateSessionAnswer( // response.data
         state.sessionId,
-        state.currentQuestionIndex,
+        state.shuffledQuestionIndex,
         payload
       );
-      state.timeSpentOnQuestion[state.currentQuestionIndex].hasSynced = true;
+      state.timeSpentOnQuestion[state.shuffledQuestionIndex].hasSynced = true;
       if (response.status != 200) {
         state.toast.error(
           `Review Status for Q.${state.currentQuestionIndex + 1} not saved. Please try to mark for review again or refresh the page.`,
@@ -577,7 +592,7 @@ export default defineComponent({
             draggablePercent: 0.4
           }
         )
-        state.responses[state.currentQuestionIndex] = state.previousResponse; // previous value?!
+        state.responses[state.shuffledQuestionIndex] = state.previousResponse; // previous value?!
       } else {
         // successful response
         state.continueAfterAnswerSubmit = true;
@@ -589,7 +604,7 @@ export default defineComponent({
     async function submitQuestion() {
       state.isSessionAnswerRequestProcessing = true;
       state.continueAfterAnswerSubmit = false;
-      const itemResponse = state.responses[state.currentQuestionIndex];
+      const itemResponse = state.responses[state.shuffledQuestionIndex];
       const payload: UpdateSessionAnswerAPIPayload = {
         answer: itemResponse.answer,
         marked_for_review: itemResponse.marked_for_review
@@ -597,14 +612,14 @@ export default defineComponent({
       if (!isQuizAssessment.value) {
         // we update time spent for homework immediately when answer is submitted
         stoptimeSpentOnQuestionCalc();
-        payload.time_spent = state.timeSpentOnQuestion[state.currentQuestionIndex].timeSpent;
+        payload.time_spent = state.timeSpentOnQuestion[state.shuffledQuestionIndex].timeSpent;
       }
       const response = await SessionAPIService.updateSessionAnswer( // response.data
         state.sessionId,
-        state.currentQuestionIndex,
+        state.shuffledQuestionIndex,
         payload
       );
-      state.timeSpentOnQuestion[state.currentQuestionIndex].hasSynced = true;
+      state.timeSpentOnQuestion[state.shuffledQuestionIndex].hasSynced = true;
       if (response.status != 200) {
         state.toast.error(
           `Answer for Q.${state.currentQuestionIndex + 1} not saved. Please try to submit again or refresh the page.`,
@@ -614,7 +629,7 @@ export default defineComponent({
             draggablePercent: 0.4
           }
         )
-        state.responses[state.currentQuestionIndex] = state.previousResponse; // previous value?!
+        state.responses[state.shuffledQuestionIndex] = state.previousResponse; // previous value?!
       } else {
         // successful response
         state.continueAfterAnswerSubmit = true;
@@ -823,12 +838,14 @@ export default defineComponent({
       state.questions.forEach((questionDetail, questionIndex) => {
         const [currentQsetIndex] = getQsetLimits(questionIndex);
         const qsetMetricsObj = state.qsetMetrics[currentQsetIndex];
+        let dynamicIndex = index;
+        if (!isOmrMode.value) dynamicIndex = state.questionOrder[index];
         if (!questionDetail.graded) qsetMetricsObj.maxQuestionsAllowedToAttempt -= 1
-        if (state.responses[index].marked_for_review === true) {
+        if (state.responses[dynamicIndex].marked_for_review === true) {
           qsetMetricsObj.numQuestionsMarkedForReview += 1;
           state.numMarkedForReview += 1;
         }
-        updateQuestionMetrics(questionDetail, state.responses[index].answer, qsetMetricsObj);
+        updateQuestionMetrics(questionDetail, state.responses[dynamicIndex].answer, qsetMetricsObj);
         if (qsetMetricsObj.numAnswered != 0) qsetMetricsObj.accuracyRate = (qsetMetricsObj.correctlyAnswered + 0.5 * qsetMetricsObj.partiallyAnswered) / qsetMetricsObj.numAnswered;
         state.qsetMetrics[currentQsetIndex].attemptRate = qsetMetricsObj.numAnswered / qsetMetricsObj.maxQuestionsAllowedToAttempt;
         state.qsetMetrics[currentQsetIndex] = qsetMetricsObj;
@@ -936,15 +953,17 @@ export default defineComponent({
         if (index > 0) startIndex = state.qsetCumulativeLengths[index - 1]
         for (let qindex = startIndex; qindex < state.qsetCumulativeLengths[index]; qindex++) {
           let qstate: questionState
+          let dynamicIndex = qindex;
+          if (!isOmrMode.value) dynamicIndex = state.questionOrder[qindex];
           if (state.hasQuizEnded) {
             const questionAnswerEvaluation = isQuestionAnswerCorrect(
-              state.questions[qindex],
-              state.responses[qindex].answer,
-              state.questions[qindex].marking_scheme?.partial != null // doesPartialMarkingExist
+              state.questions[dynamicIndex],
+              state.responses[dynamicIndex].answer,
+              state.questions[dynamicIndex].marking_scheme?.partial != null // doesPartialMarkingExist
             )
-            if (!questionAnswerEvaluation.valid && state.questions[qindex].graded) continue
+            if (!questionAnswerEvaluation.valid && state.questions[dynamicIndex].graded) continue
 
-            if (!state.questions[qindex].graded) {
+            if (!state.questions[dynamicIndex].graded) {
               qstate = "neutral"
             } else if (
               !questionAnswerEvaluation.answered ||
@@ -960,11 +979,11 @@ export default defineComponent({
             }
           } else {
             if (state.responses.length > 0) {
-              if (!state.responses[qindex].visited) { // initially responses empty
+              if (!state.responses[dynamicIndex].visited) { // initially responses empty
                 qstate = "neutral"
               } else {
-                if (state.responses[qindex].answer != null) qstate = "success"
-                else if (state.responses[qindex].marked_for_review) qstate = "review"
+                if (state.responses[dynamicIndex].answer != null) qstate = "success"
+                else if (state.responses[dynamicIndex].marked_for_review) qstate = "review"
                 else qstate = "error"
               }
             } else qstate = "error"
